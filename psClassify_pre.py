@@ -3,7 +3,6 @@
 import sys
 sys.path.append('/home/desktop/patstat_data/all_code/dbUtils')
 import company_legal_id as legal
-import consolidate_df as cd
 import pandas as pd
 import numpy as np
 import random
@@ -15,18 +14,16 @@ root_folder = '/home/desktop/patstat_data/all_code/psClean/code/clean/patstat_ge
 labeled_data_folder = '/home/desktop/patstat_data/all_code/psClassify/labeled_data/'
 r_data_folder = '/home/desktop/patstat_data/all_code/psClassify/r_data/'
 
-countries = [ 'at', 'bg', 'be', 
-        'it', 'gb', 'fr', 'de', 'sk', 'se', 'pt', 'pl',
-        'hu', 'ie', 'ee', 'es', 'cy', 
-         'nl', 'si', 'ro', 'dk', 
-        'cz', 'lt', 'lu', 'lv', 'mt', 'fi', 'gr']
+# EU27
+countries = [ 'at', 'bg', 'be', 'it', 'gb', 'fr', 'de', 'sk', 'se', 
+              'pt', 'pl', 'hu', 'ie', 'ee', 'es', 'cy', 'nl', 'si', 
+              'ro', 'dk', 'cz', 'lt', 'lu', 'lv', 'mt', 'fi', 'gr']
 
-    
 common_names = pd.read_csv('/home/desktop/patstat_data/all_code/dbUtils/country_common_person_names.csv',sep='\t')
+
 find_legal = legal.FindLegalId()
 
-## DEFINE STUFF
-
+## Define functions that will be used to create name features
 def wordcount(name):
     return len(name.split())
     
@@ -38,7 +35,6 @@ def has_three_words(name):
         
 def has_two_words(name):
     return 1 if len(name.split()) == 2 else 0       
-
 
 def has_legal_out(row):
     name = row['name']
@@ -74,7 +70,7 @@ def only_letters(d):
     d2 = d.replace(' ','')
     return 0 if (bool(_digits.search(d2)) or not d2.isalnum()) else 1
 
-## LOAD STUFF
+## Load previously labeled data
 if 'labels.csv' in os.listdir(labeled_data_folder):
     old_data = pd.read_csv(labeled_data_folder + 'labels.csv', sep='\t')
     old_data = old_data[['patstat_id', 'is_person']].set_index('patstat_id')
@@ -82,6 +78,7 @@ if 'labels.csv' in os.listdir(labeled_data_folder):
 else:
     already_loaded = 0
 
+## Load Patstat data
 df_large = pd.DataFrame()
 for country in countries:
     print 'loading', country.upper()
@@ -109,42 +106,12 @@ df_large = df_large[['country', 'name',
                     'applicant_seq', 'inventor_seq']]
 
 df_large = df_large.reset_index(drop=True)
-"""                
-# CONSOLIDATE DATA
-
-mean_app = df_large.applnt_seq.values.mean()
-df_large['applnt_seq'] = df_large['applnt_seq'].astype(str)
-                          
-consolidate_dict = {'name': cd.consolidate_unique,
-                    'country': cd.consolidate_unique,
-                    'patent_ct': sum,
-                    'patstat_id': cd.consolidate_id,
-                    'applnt_seq': cd.consolidate_id,
-                    ''}
-                    
-print 'consolidating dataframe...'
-df_large = cd.consolidate(df_large, ['name', 'country'], consolidate_dict)
-df_large = df_large[['patstat_id','name','country','applnt_seq','patent_ct']].set_index('patstat_id')
-
-
-# ADD VARS
-
-print 'adding applicant score...'
-app_score = []
-for i, row in df_large.iterrows():
-    if row['applnt_seq']:
-        score = sum([int(s.replace("'",""))-mean_app for s in row['applnt_seq'].split('**')])
-    else:
-        score = None
-    app_score.append(score)
-
-df_large['applnt_score'] = app_score
-"""
 
 old_data = pd.merge(old_data.reset_index(), df_large, how='inner')
 old_data = old_data.set_index('patstat_id')
 old_data = old_data[['is_person']]
 
+## Smart-convert to string (avoids truncating strings)
 df_large['name'] = df_large['name'].apply(as_str)
 print 'adding word count...'
 df_large['word_count'] = df_large['name'].apply(wordcount)
@@ -179,40 +146,34 @@ df_large['maybe_foreign_legal'] = df_large['name'].apply(maybe_foreign_legal)
 print 'adding dummy: has first name...'
 df_large['has_first_name'] = [common_first_name(r) for i, r in df_large.iterrows()]
 
-# CERTAINLY THEY ARE NOT PERSON NAMES...
-
+## Some records are not person names for sure. 
 df_large['certain_not_person'] = 0
-# has country-appropriate legal id at beginning or end of name
 df_large.certain_not_person[df_large.has_legal_out == 1] = 1
-# has numbers or non-alphanum characters in name
 df_large.certain_not_person[df_large.only_letters == 0] = 1
-# has more than 100 patents
 df_large.certain_not_person[df_large.lots_of_patents == 1] = 1
-# has same name as entity to which we assigned a 1
+
+# extend the above to entities in all countries with the same name
 df_copy = pd.DataFrame(df_large.groupby('name').size(), columns=['size'])
 dup_names = set(df_copy[df_copy.size>1].index)
 certains = set(df_large[df_large.certain_not_person == 1].name)
 dup_certain = list(set.intersection(dup_names, certains))
-
 df_large = df_large.set_index('name')
 df_large['certain_not_person'].loc[dup_certain] = 1
 df_large = df_large.reset_index()
 
-# RANDOM SAMPLE WHERE WE DONT HAVE LABEL
-
+## Extract a random sample for hand-labeling
 if not already_loaded:
     random.seed(1)
 else:
     random.seed(len(old_data))
 random_sample = random.sample(df_large[df_large.certain_not_person == 0].index, 100)
 
-# CLASSIFY EACH ROW
-
+## Hand label some names to get training data
 assigned_class = []
 for nn, pid in enumerate(random_sample):
     print nn, 'done.'
     os.system('clear')
-    print df_large.loc[pid][['applnt_seq', 'name', 'patent_ct']]
+    print df_large.loc[pid][['applicant_seq', 'name', 'patent_ct']]
     
     hand_label = -1
     while not hand_label in ['0','1','exit']:
@@ -229,15 +190,13 @@ labeled_data = labeled_data.set_index('patstat_id')
 if already_loaded:
     labeled_data = old_data.append(labeled_data)
 
-# SAVE
+## Save the labels to a csv file
 labeled_data.to_csv(labeled_data_folder + 'labels.csv', sep='\t', mode='w')
 
-#labeled_data = old_data
+## Join the labels with the original data frame
 labeled_data = labeled_data.join(df_large.set_index('patstat_id'), how='outer')
 labeled_data = labeled_data[pd.notnull(labeled_data.name)]
-### MOVE TO R ###
-# export only if certain_not_person
 
-# ALL DATA - no labels
+## Export data for R
 R_all = labeled_data #.drop(['name', 'country', 'applnt_seq'], 1)
 R_all.to_csv(r_data_folder + 'r_input.csv', sep='\t')
